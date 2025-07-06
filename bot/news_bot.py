@@ -1,84 +1,123 @@
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+from pyppeteer import launch
 import firebase_admin
 from firebase_admin import credentials, firestore
 import datetime
 import time
-import json
-import os
+from google import genai
 
-# Initialize Firebase Admin SDK with credentials from file
-cred = credentials.Certificate('firebase_credentials.json')
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+def initialize_firebase():
+    try:
+        cred = credentials.Certificate('firebase_credentials.json')
+        firebase_admin.initialize_app(cred)
+        print("Firebase Admin SDK initialized successfully.")
+        return firestore.client()
+    except Exception as e:
+        print(f"Error initializing Firebase Admin SDK: {e}")
+        return None
 
-def scrape_news():
-    # Using a real news site - El País América
+db = initialize_firebase()
+
+# Initialize Gemini client
+client = genai.Client(api_key="AIzaSyCsVh2SR_GdPlI2MvtC0qi4cWlmOKNzkjo")
+
+def generate_summary_with_gemini(text: str) -> str:
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"Rewrite the following news title into a detailed news summary:\nTitle: {text}\nSummary:"
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Exception during Gemini API call: {e}")
+        return "No hay resumen disponible"
+
+async def scrape_news():
     url = "https://elpais.com/america/"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.text, "html.parser")
+    browser = await launch(executablePath='C:\\Users\\looja\\AppData\\Local\\Chromium\\Application\\chrome.exe', headless=True, args=['--no-sandbox'])
+    page = await browser.newPage()
+    await page.goto(url, {'waitUntil': 'networkidle2'})
+    await asyncio.sleep(5)  # wait for dynamic content to load
 
-    articles = []
-    # El País specific selectors
-    for article in soup.select("article"):
-        try:
-            title_elem = article.select_one("h2")
-            summary_elem = article.select_one("div.c_d")
-            
-            if title_elem:
-                title = title_elem.get_text(strip=True)
-                content = summary_elem.get_text(strip=True) if summary_elem else "No hay resumen disponible"
-                published_at = datetime.datetime.now()
-                
-                if title and not any(a['title'] == title for a in articles):  # Avoid duplicates
-                    articles.append({
-                        "title": title,
-                        "content": content,
-                        "publishedAt": published_at,
-                        "source": "El País América"
-                    })
-                    print(f"Scraped article: {title}")
-        except Exception as e:
-            print(f"Error processing article: {e}")
+    articles = await page.evaluate('''() => {
+        const articleNodes = document.querySelectorAll('article');
+        const articles = [];
+        articleNodes.forEach(article => {
+            const titleElem = article.querySelector('h2');
+            const summaryElem = article.querySelector('p.c_d');
+            const title = titleElem ? titleElem.innerText.trim() : null;
+            const content = summaryElem ? summaryElem.innerText.trim() : null;
+            if (title) {
+                articles.push({title, content});
+            }
+        });
+        return articles;
+    }''')
+
+    await browser.close()
+
+    # Add publishedAt, source fields and generate summary with Gemini if missing
+    now = datetime.datetime.now()
+    for article in articles:
+        print(f"Processing article: {article['title']}")
+        print(f"Original content: {article['content']}")
+        article['publishedAt'] = now.isoformat()
+        article['source'] = "El País América"
+        if not article['content'] or article['content'] == "No hay resumen disponible":
+            # Use Gemini API to generate summary from title
+            generated_summary = generate_summary_with_gemini(article['title'])
+            print(f"Generated summary: {generated_summary}")
+            article['content'] = generated_summary
+
     return articles
 
 def publish_news_to_firebase(articles):
-    for article in articles:
-        # Convert datetime to string for Firestore
-        article['publishedAt'] = article['publishedAt'].isoformat()
-        
-        # Check if article already exists by title
-        docs = db.collection("news").where("title", "==", article["title"]).stream()
-        if any(docs):
-            print(f"Article '{article['title']}' already exists. Skipping.")
-            continue
-        
-        # Add new article
-        db.collection("news").add(article)
-        print(f"Published article '{article['title']}' to Firebase.")
+    if db is None:
+        print("Firestore client is not initialized. Cannot publish articles.")
+        return
 
-def main():
-    print("Iniciando el bot de noticias...")
-    while True:
+    for i, article in enumerate(articles):
+        # Skip articles with default summary
+        if not article['content'] or article['content'] == "No hay resumen disponible":
+            print(f"Skipping article '{article['title']}' due to missing or default summary.")
+            continue
+
+        # publishedAt is already ISO string
+        # Check if article already exists by title
         try:
-            print("\nObteniendo noticias nuevas...")
-            articles = scrape_news()
-            if articles:
-                print(f"Se encontraron {len(articles)} artículos")
-                publish_news_to_firebase(articles)
-                print("Artículos publicados en Firebase")
-            else:
-                print("No se encontraron nuevos artículos")
-            
-            # Esperar 30 minutos antes de la siguiente actualización
-            print("Esperando 30 minutos para la próxima actualización...")
-            time.sleep(1800)
+            docs = db.collection("news").where("title", "==", article["title"]).stream()
+            if any(docs):
+                print(f"Article '{article['title']}' already exists. Skipping.")
+                continue
         except Exception as e:
-            print(f"Error en el ciclo principal: {e}")
-            time.sleep(60)  # Esperar 1 minuto si hay error
+            print(f"Error checking existing articles in Firestore: {e}")
+            continue
+
+        # Add new article
+        try:
+            db.collection("news").add(article)
+            print(f"Published article '{article['title']}' to Firebase.")
+        except Exception as e:
+            print(f"Error publishing article '{article['title']}' to Firebase: {e}")
+
+        # Publish only one article and stop
+        print("Published one article, stopping for verification.")
+        break
+
+async def main():
+    print("Iniciando el bot de noticias con pyppeteer y resumen generado por Gemini...")
+    try:
+        print("\nObteniendo noticias nuevas...")
+        articles = await scrape_news()
+        if articles:
+            print(f"Se encontraron {len(articles)} artículos")
+            publish_news_to_firebase(articles)
+            print("Artículos publicados en Firebase")
+        else:
+            print("No se encontraron nuevos artículos")
+    except Exception as e:
+        print(f"Error en el ciclo principal: {e}")
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())

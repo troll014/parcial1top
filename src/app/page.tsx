@@ -27,12 +27,15 @@ export default function HomePage() {
         const newsData: NewsArticle[] = [];
         querySnapshot.forEach((doc) => {
           const data = doc.data();
-          newsData.push({
-            id: doc.id,
-            title: data.title,
-            content: data.content,
-            publishedAt: new Date(data.publishedAt),
-          });
+          // Filter out articles with no summary or default summary
+          if (data.content && data.content !== "No hay resumen disponible") {
+            newsData.push({
+              id: doc.id,
+              title: data.title,
+              content: data.content,
+              publishedAt: new Date(data.publishedAt),
+            });
+          }
         });
         setNews(newsData);
       } catch (error) {
@@ -57,27 +60,27 @@ export default function HomePage() {
           </div>
         ) : (
           <div className={styles.grid}>
-            {news.map((article) => (
-              <Card key={article.id} className={styles.card}>
-                <CardHeader>
-                  <h2 className={styles.cardTitle}>{article.title}</h2>
-                  <p className={styles.cardDate}>
-                    {new Date(article.publishedAt).toLocaleDateString("es-ES", {
-                      year: "numeric",
-                      month: "long",
-                      day: "numeric",
-                    })}
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <p className={styles.cardContent}>
-                    {article.content && article.content !== "No hay resumen disponible"
-                      ? article.content
-                      : "No hay resumen disponible"}
-                  </p>
-                </CardContent>
-              </Card>
-            ))}
+            {news.length === 0 ? (
+              <p>No hay noticias con resumen disponible.</p>
+            ) : (
+              news.map((article: NewsArticle) => (
+                <Card key={article.id} className={styles.card}>
+                  <CardHeader>
+                    <h2 className={styles.cardTitle}>{article.title}</h2>
+                    <p className={styles.cardDate}>
+                      {new Date(article.publishedAt).toLocaleDateString("es-ES", {
+                        year: "numeric",
+                        month: "long",
+                        day: "numeric",
+                      })}
+                    </p>
+                  </CardHeader>
+                  <CardContent>
+                    <p className={styles.cardContent}>{article.content}</p>
+                  </CardContent>
+                </Card>
+              ))
+            )}
           </div>
         )}
       </main>

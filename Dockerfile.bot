@@ -7,7 +7,8 @@ WORKDIR /bot
 # Copy requirements first to leverage Docker cache
 COPY bot/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
+# Install google-genai package explicitly
+RUN pip install google-genai
 # Copy bot files
 COPY bot/news_bot.py .
 
